@@ -9,12 +9,27 @@ const char* password = "<WIFI PASSWORD>";
 
 const char* device_id = "DZRJE0991"; // Change this
 
-const char* apiKey = "zuosZL4xqy3k8ss8ESbR731o2HH58n1v3xZjqVp3";
+const char* apiKey = "<API KEY>";
 const char* ntpServer = "pool.ntp.org";
 const char* apiBaseUrl = "https://9lies56ebj.execute-api.eu-west-2.amazonaws.com/v1/";
 
 StaticJsonDocument<500> doc;
-unsigned long epochTime;
+
+// Definition of sleep mode properties
+//                           seconds
+//                              v
+const uint32_t SLEEP_DURATION = 60 * 1000000; // µs
+
+// Definition of time control parameters
+const uint16_t LOOP_FREQUENCY = 25;                    // Hz
+const uint16_t WAIT_PERIOD    = 1000 / LOOP_FREQUENCY; // ms
+
+struct Timer {
+    uint32_t laptime;
+    uint32_t ticks;
+};
+
+Timer timer;
 
 // DHT11 (Temperature Humidity)
 // https://esp32io.com/tutorials/esp32-temperature-humidity-sensor
@@ -30,11 +45,6 @@ BH1750 lightMeter;
 
 // Soil Moisture
 int PIN_SOIL_MOISTURE = 33;
-
-// Grove - Sunlight Sensor (UV Index)
-// https://wiki.seeedstudio.com/Grove-Sunlight_Sensor/
-// #include "Si115X.h"
-// Si115X sunlightSensor;
 
 void connectToWiFi() {
   // Connect to Wifi
@@ -93,16 +103,18 @@ void connectToWiFi() {
 void setup() {
   Serial.begin(9600);
 
-  connectToWiFi();
+  // initializes the timer
+  timer = { millis(), 0 };
 
   // init sensors
   Wire.begin();
   dht.begin();
   lightMeter.begin();
-  // sunlightSensor.Begin();
 }
 
 void sendData() {
+  Serial.println("Uploading data... ");
+
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
 
@@ -135,11 +147,18 @@ unsigned long getTime() {
   return now;
 }
 
-void loop() {
-  // Wait a 1 minute between measurements.
-  delay(60000);  //60000 when done
+// Time control of the main loop
+void waitForNextCycle() {
+    uint32_t now;
+    do { 
+      now = millis(); 
+    } while (now - timer.laptime < WAIT_PERIOD);
+    timer.laptime = now;
+    timer.ticks++;
+}
 
-  epochTime = getTime();
+void collectData() {
+  unsigned long epochTime = getTime();
 
   // DHT11
   // Read Humidity as percentage
@@ -181,17 +200,6 @@ void loop() {
     Serial.print(F(" lx\n"));
   }
 
-  // UV index
-  // https://wiki.seeedstudio.com/Grove-Sunlight_Sensor/
-  // float uvIndex = sunlightSensor.ReadHalfWord_UV();
-  // if (isnan(uvIndex)) {
-  //   Serial.println(F("Failed to read from UV sensor!"));
-  // } else {
-  //   Serial.print(F("UV Index: "));
-  //   Serial.print(uvIndex);
-  //   Serial.print(F("\n"));
-  // }
-
   doc["device_id"] = device_id;
   doc["mac_address"] = WiFi.macAddress();
   doc["ip_address"] = WiFi.localIP();
@@ -199,9 +207,51 @@ void loop() {
   doc["humidity_level"] = humidityLevel;
   doc["soil_moisture"] = soilMoisturePercent;
   doc["light_intensity"] = lux;
-  doc["uv_index"] = 0.0; // WIP
   doc["happened_at"] = epochTime;
+}
 
-  Serial.println("Uploading data... ");
+void work() {
+  connectToWiFi();
+  collectData();
   sendData();
+}
+
+void loop() {
+  Serial.println("Waking up...");
+
+  uint32_t startFreeHeap = ESP.getFreeHeap();
+
+  uint32_t startTime = millis();
+
+  work();
+
+  uint32_t memoryUsed = startFreeHeap - ESP.getFreeHeap();
+  Serial.print(F("Memory used: "));
+  Serial.print(memoryUsed);
+  Serial.print(F(" bytes\n"));  
+
+  uint32_t executionTime = millis() - startTime;
+  Serial.print(F("Execution Time: "));
+  Serial.print(executionTime);
+  Serial.print(F(" ms\n"));
+
+  hibernate();
+
+  waitForNextCycle();
+}
+
+void deepSleep() {
+  esp_sleep_enable_timer_wakeup(SLEEP_DURATION);
+  esp_deep_sleep_start();
+}
+
+void hibernate() {
+  Serial.println("Hibernation Start...");
+
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH,   ESP_PD_OPTION_OFF);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_OFF);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_XTAL,         ESP_PD_OPTION_OFF);
+    
+  deepSleep();
 }
